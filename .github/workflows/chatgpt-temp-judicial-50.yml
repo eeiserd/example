@@ -1,0 +1,61 @@
+name: ChatGPT Temp Judicial 50
+on:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download official JY Interpretations 755-706
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p selected
+          : > selected/manifest.tsv
+          for NO in $(seq 755 -1 706); do
+            DOCID=$((310181 + NO))
+            echo "=== $NO / $DOCID ==="
+            mkdir -p "selected/$NO"
+            curl -L --fail --retry 10 --retry-delay 3 --connect-timeout 30 -A 'Mozilla/5.0' \
+              "https://cons.judicial.gov.tw/Ajax/docdownload.aspx?fid=100&id=${DOCID}" -o package.zip
+            curl -L --fail --retry 10 --retry-delay 3 --connect-timeout 30 -A 'Mozilla/5.0' \
+              "https://cons.judicial.gov.tw/docdata.aspx?fid=100&id=${DOCID}" -o page.html
+            python - "$NO" <<'PY'
+          import sys, zipfile, os, shutil, re, html
+          no=sys.argv[1]
+          raw=open('page.html','rb').read().decode('utf-8','replace')
+          text=html.unescape(re.sub(r'<[^>]+>',' ',raw))
+          text=re.sub(r'\s+',' ',text)
+          m=re.search(rf'釋字第{no}號[〖\[]([^〗\]]+)[〗\]]',text)
+          title=m.group(1).strip() if m else ''
+          keep=[]
+          with zipfile.ZipFile('package.zip') as z:
+              for n in z.namelist():
+                  base=os.path.basename(n)
+                  is_main = base == f'釋字第{no}號.pdf'
+                  is_justice_opinion = ('大法官' in base and '意見書' in base and base.lower().endswith('.pdf'))
+                  if is_main or is_justice_opinion:
+                      keep.append(n)
+              if not any(os.path.basename(n)==f'釋字第{no}號.pdf' for n in keep):
+                  raise SystemExit(f'missing main PDF for {no}')
+              for n in keep:
+                  base=os.path.basename(n)
+                  with z.open(n) as src, open(os.path.join('selected',no,base),'wb') as dst:
+                      shutil.copyfileobj(src,dst)
+          names='|'.join(os.path.basename(n).replace('\t',' ') for n in keep)
+          with open('selected/manifest.tsv','a',encoding='utf-8') as f:
+              f.write(f'{no}\t{title}\t{len(keep)}\t{names}\n')
+          print(no, title, len(keep))
+          PY
+            for f in "selected/$NO"/*.pdf; do test "$(head -c 4 "$f")" = '%PDF'; done
+            rm -f package.zip page.html
+          done
+      - name: Upload selected corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: judicial-755-706-selected
+          path: selected
+          if-no-files-found: error
+          compression-level: 0
